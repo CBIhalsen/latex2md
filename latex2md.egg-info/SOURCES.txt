@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+setup.cfg
+latex2md/__init__.py
+latex2md/cli.py
+latex2md/converter.py
+latex2md.egg-info/PKG-INFO
+latex2md.egg-info/SOURCES.txt
+latex2md.egg-info/dependency_links.txt
+latex2md.egg-info/entry_points.txt
+latex2md.egg-info/top_level.txt

@@ -1,0 +1,2 @@
+[console_scripts]
+latex2md = latex2md.cli:main
