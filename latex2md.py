@@ -140,8 +140,21 @@ class Latex2Md:
             shutil.copy2(tex_file, target_path)
             self.logger.debug(f"Copied {tex_file} to {target_path}")
 
-        # Copy all image files
+        # Copy all image files - scan deeply for figures folder
         for img_ext in ['*.png', '*.jpg', '*.jpeg', '*.pdf', '*.eps', '*.svg']:
+            # Specifically look in figures directories
+            for img_file in glob.glob(os.path.join(self.project_dir, "**/figures/" + img_ext), recursive=True):
+                rel_path = os.path.relpath(img_file, self.project_dir)
+                target_path = os.path.join(self.temp_dir, rel_path)
+
+                # Create directory structure
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+                # Copy file
+                shutil.copy2(img_file, target_path)
+                self.logger.debug(f"Copied {img_file} to {target_path}")
+
+            # Also look in all directories for images
             for img_file in glob.glob(os.path.join(self.project_dir, "**/" + img_ext), recursive=True):
                 rel_path = os.path.relpath(img_file, self.project_dir)
                 target_path = os.path.join(self.temp_dir, rel_path)
@@ -303,11 +316,11 @@ class Latex2Md:
         # Process document class and preamble
         content = self.remove_preamble(content)
 
+        # Convert sections and subsections (including \maketitle)
+        content = self.convert_sections(content)
+
         # Handle multi-column layouts
         content = self.process_multicol(content)
-
-        # Convert sections and subsections
-        content = self.convert_sections(content)
 
         # Convert figures and tables
         content = self.convert_figures(content)
@@ -319,11 +332,11 @@ class Latex2Md:
         # Convert references
         content = self.convert_references(content)
 
-        # Convert formatting
-        content = self.convert_formatting(content)
-
         # Convert lists
         content = self.convert_lists(content)
+
+        # Convert formatting
+        content = self.convert_formatting(content)
 
         # Final cleanup
         content = self.final_cleanup(content)
@@ -342,10 +355,10 @@ class Latex2Md:
 
     def process_multicol(self, content):
         """
-        Process multi-column layouts in LaTeX.
-        Improved to better handle academic paper layouts.
+        Process multi-column layouts in LaTeX. Improved to better handle academic paper layouts,
+        without做无差别 're.sub(r"\\.*", "")' 的操作，避免误删表格文本。
         """
-        # Find all multicol environments
+        # 匹配多列环境
         multicol_pattern = r'\\begin{multicols}{(\d+)}(.*?)\\end{multicols}'
         multicols = re.finditer(multicol_pattern, content, re.DOTALL)
 
@@ -353,49 +366,25 @@ class Latex2Md:
             num_cols = int(match.group(1))
             multicol_content = match.group(2)
 
-            # If it's a 2-column layout
-            if num_cols == 2:
-                # Try to split the content into columns
-                columns = self.split_multicol_content(multicol_content, num_cols)
+            # 拆分多列内容
+            columns = self.split_multicol_content(multicol_content, num_cols)
+            # 处理每一列
+            processed_columns = [self.process_column_content(col) for col in columns]
+            # 将各列在逻辑顺序上拼回
+            new_content = "\n\n".join(processed_columns)
+            content = content.replace(match.group(0), new_content)
 
-                # Process each column separately
-                processed_columns = [self.process_column_content(col) for col in columns]
-
-                # Combine columns in the specified order (left then right for 2 columns)
-                new_content = "\n\n".join(processed_columns)
-
-                # Replace the original multicol environment
-                content = content.replace(match.group(0), new_content)
-            else:
-                # For other column counts, process differently
-                columns = self.split_multicol_content(multicol_content, num_cols)
-                processed_columns = [self.process_column_content(col) for col in columns]
-
-                # For more than 2 columns, we'll join them in reading order
-                new_content = "\n\n".join(processed_columns)
-
-                # Replace the original multicol environment
-                content = content.replace(match.group(0), new_content)
-
-        # Also handle two-column document class
+            # 如果是双栏文档类型（twocolumn), 简化处理为将整篇文本按行数一分为二
         if re.search(r'\\documentclass(\[.*?\])?\{.*?twocolumn.*?\}', self.content, re.DOTALL) or \
                 re.search(r'\\documentclass(\[.*?twocolumn.*?\])\{', self.content):
-            # For two-column document class, we need to handle the entire content
-            # This is a simplified approach - in reality, we'd need more sophisticated parsing
-
-            # Try to identify column breaks (often indicated by page breaks or specific markers)
-            # For simplicity, we'll just split the content in half
             lines = content.split('\n')
             mid_point = len(lines) // 2
-
             left_col = '\n'.join(lines[:mid_point])
             right_col = '\n'.join(lines[mid_point:])
 
-            # Process each column
             left_col = self.process_column_content(left_col)
             right_col = self.process_column_content(right_col)
 
-            # Combine columns
             content = f"{left_col}\n\n{right_col}"
 
         return content
@@ -470,16 +459,54 @@ class Latex2Md:
     def convert_sections(self, content):
         """Convert LaTeX sections to Markdown headings."""
         # Convert \chapter
+        content = re.sub(r'\\chapter\*{(.*?)}', r'# \1', content)
         content = re.sub(r'\\chapter{(.*?)}', r'# \1', content)
 
         # Convert \section
+        content = re.sub(r'\\section\*{(.*?)}', r'## \1', content)
         content = re.sub(r'\\section{(.*?)}', r'## \1', content)
 
         # Convert \subsection
+        content = re.sub(r'\\subsection\*{(.*?)}', r'### \1', content)
         content = re.sub(r'\\subsection{(.*?)}', r'### \1', content)
 
         # Convert \subsubsection
+        content = re.sub(r'\\subsubsection\*{(.*?)}', r'#### \1', content)
         content = re.sub(r'\\subsubsection{(.*?)}', r'#### \1', content)
+
+        # Convert \maketitle to a simple title
+        if '\\maketitle' in content:
+            title = ""
+            author = ""
+            date = ""
+            # 从原始 self.content 中获取标题、作者、日期
+            title_match = re.search(r'\\title{(.*?)}', self.content, re.DOTALL)
+            if title_match:
+                title = self.clean_latex_formatting(title_match.group(1))
+
+            author_match = re.search(r'\\author{(.*?)}', self.content, re.DOTALL)
+            if author_match:
+                author = self.clean_latex_formatting(author_match.group(1))
+
+            date_match = re.search(r'\\date{(.*?)}', self.content, re.DOTALL)
+            if date_match:
+                date_content = date_match.group(1).strip()
+                if date_content == '\\today':
+                    from datetime import datetime
+                    date = datetime.now().strftime("%B %d, %Y")
+                else:
+                    date = self.clean_latex_formatting(date_content)
+            elif '\\date{\\today}' in self.content or '\\today' in self.content:
+                from datetime import datetime
+                date = datetime.now().strftime("%B %d, %Y")
+
+            md_title = f"# {title}\n\n"
+            if author:
+                md_title += f"**Author:** {author}\n\n"
+            if date:
+                md_title += f"**Date:** {date}\n\n"
+
+            content = content.replace('\\maketitle', md_title)
 
         return content
 
@@ -579,73 +606,205 @@ class Latex2Md:
         self.logger.warning(f"Could not find image file: {source_path}")
 
     def convert_tables(self, content):
-        """Convert LaTeX tables to Markdown tables."""
-        # Find all table environments
+        """
+        将 LaTeX 中的长表(longtable)、常规 table/tabular 环境转换为带冒号对齐符号的 Markdown 表格。
+        在第一行(表头)和数据行之间自动插入对齐分隔行 (---、:---、:---:) 等，以便 Markdown 正确渲染。
+        """
+
+        import re
+
+        # ─────────────────────────────────────────────────────────────
+        # 辅助函数：解析列格式，生成 ["l","c","r"] 这样的对齐列表
+        # ─────────────────────────────────────────────────────────────
+        def parse_column_spec(col_spec):
+            # 去除竖线 | 和空白
+            col_spec_clean = col_spec.replace('|', '').strip()
+            # 匹配其中的 l / c / r
+            alignments = re.findall(r'[lcr]', col_spec_clean)
+            return alignments
+
+        # ─────────────────────────────────────────────────────────────
+        # 辅助函数：根据对齐信息生成“分隔线”行
+        # 其中:
+        #   l => :---
+        #   c => :---:
+        #   r => ---:
+        # 如果不匹配，就用默认 '---'
+        # ─────────────────────────────────────────────────────────────
+        def build_alignment_row(alignments):
+            row_parts = []
+            for a in alignments:
+                if a == 'l':
+                    row_parts.append(':---')
+                elif a == 'c':
+                    row_parts.append(':---:')
+                elif a == 'r':
+                    row_parts.append('---:')
+                else:
+                    row_parts.append('---')
+            return '| ' + ' | '.join(row_parts) + ' |'
+
+        # ─────────────────────────────────────────────────────────────
+        # 辅助函数：将二维数组(rows)转为 Markdown 表格文本
+        # 第一行视为“表头”，紧跟一行对齐分隔行，其后是表内容
+        # ─────────────────────────────────────────────────────────────
+        def rows_to_md_table(rows, col_spec):
+            if not rows:
+                return ''
+
+            # 解析到的对齐方式
+            alignments = parse_column_spec(col_spec)
+
+            # 计算所有行的最大列数
+            max_cols = max(len(r) for r in rows)
+
+            # 如果 alignments 长度比列数要短，就补齐；比列数长就截断
+            if len(alignments) < max_cols:
+                alignments += ['l'] * (max_cols - len(alignments))
+            alignments = alignments[:max_cols]
+
+            # 补空单元格
+            for r in rows:
+                while len(r) < max_cols:
+                    r.append('')
+
+            # 第一行视为表头
+            header_row = rows[0]
+
+            # 生成 Markdown 表格文本
+            md_lines = []
+            # 1) 表头行
+            md_lines.append('| ' + ' | '.join(self.clean_latex_formatting(cell) for cell in header_row) + ' |')
+            # 2) 分隔行
+            md_lines.append(build_alignment_row(alignments))
+            # 3) 数据行
+            for row in rows[1:]:
+                line = '| ' + ' | '.join(self.clean_latex_formatting(cell) for cell in row) + ' |'
+                md_lines.append(line)
+
+            return '\n'.join(md_lines)
+
+        # ─────────────────────────────────────────────────────────────
+        # 处理 longtable 环境
+        # ─────────────────────────────────────────────────────────────
+        longtable_pattern = r'\\begin{longtable}{(.*?)}(.*?)\\end{longtable}'
+        longtables = re.finditer(longtable_pattern, content, re.DOTALL)
+        for match in longtables:
+            col_spec = match.group(1)
+            table_content = match.group(2)
+
+            # 提取 caption
+            caption = ""
+            caption_match = re.search(r'\\caption{(.*?)}', table_content, re.DOTALL)
+            if caption_match:
+                caption = self.clean_latex_formatting(caption_match.group(1))
+                table_content = table_content.replace(caption_match.group(0), '')
+
+            # 提取 label
+            label = ""
+            label_match = re.search(r'\\label{(.*?)}', table_content)
+            if label_match:
+                label = label_match.group(1)
+                table_content = table_content.replace(label_match.group(0), '')
+
+            # 去掉 longtable 中的一些控制命令
+            for cmd in ['\\endhead', '\\endfirsthead', '\\endfoot', '\\endlastfoot', '\\hline']:
+                table_content = table_content.replace(cmd, '')
+
+            # 拆分成多行，然后按 "&" 分割列
+            rows_raw = re.split(r'\\\\', table_content)
+            rows = []
+            for row in rows_raw:
+                row = row.strip()
+                if row:
+                    cells = [cell.strip() for cell in row.split('&')]
+                    rows.append(cells)
+
+            # 转换为 Markdown 表格
+            md_table = rows_to_md_table(rows, col_spec)
+            if caption:
+                md_table += f"\n\n*{caption}*"
+            # 如果有 label，就加上锚点
+            if label:
+                md_table = f'<a id="{label}"></a>\n\n{md_table}'
+
+            # 替换整个 longtable 环境
+            content = content.replace(match.group(0), md_table)
+
+        # ─────────────────────────────────────────────────────────────
+        # 处理 \begin{table}...\end{table} 环境
+        # ─────────────────────────────────────────────────────────────
         table_pattern = r'\\begin{table}(.*?)\\end{table}'
         tables = re.finditer(table_pattern, content, re.DOTALL)
-
         for match in tables:
+            entire_table_env = match.group(0)
             table_content = match.group(1)
 
-            # Extract caption if available
+            # caption
             caption = ""
-            caption_match = re.search(r'\\caption{(.*?)}', table_content)
+            caption_match = re.search(r'\\caption{(.*?)}', table_content, re.DOTALL)
             if caption_match:
                 caption = self.clean_latex_formatting(caption_match.group(1))
 
-            # Extract label if available
+            # label
             label = ""
             label_match = re.search(r'\\label{(.*?)}', table_content)
             if label_match:
                 label = label_match.group(1)
 
-            # Extract tabular environment
+            # 搜索 tabular
             tabular_pattern = r'\\begin{tabular}{(.*?)}(.*?)\\end{tabular}'
             tabular_match = re.search(tabular_pattern, table_content, re.DOTALL)
-
             if tabular_match:
                 col_spec = tabular_match.group(1)
                 rows_content = tabular_match.group(2)
 
-                # Count columns
-                num_cols = len(re.sub(r'[^lcr|]', '', col_spec))
+                # 去掉 \hline
+                rows_content = rows_content.replace('\\hline', '')
 
-                # Split into rows
-                rows = rows_content.split('\\\\')
+                # 根据 '\\\\' 分隔行，再根据 '&' 分隔列
+                rows_raw = re.split(r'\\\\', rows_content)
+                rows = []
+                for row in rows_raw:
+                    row = row.strip()
+                    if row:
+                        cells = [cell.strip() for cell in row.split('&')]
+                        rows.append(cells)
 
-                # Create markdown table
-                md_table = []
-
-                # Add header row (first row)
-                if rows:
-                    header = rows[0].strip()
-                    header_cells = re.split(r'&', header)
-                    md_table.append('| ' + ' | '.join(
-                        [self.clean_latex_formatting(cell.strip()) for cell in header_cells]) + ' |')
-
-                    # Add separator row
-                    md_table.append('| ' + ' | '.join(['---'] * len(header_cells)) + ' |')
-
-                    # Add data rows
-                    for row in rows[1:]:
-                        row = row.strip()
-                        if not row:
-                            continue
-                        cells = re.split(r'&', row)
-                        md_table.append('| ' + ' | '.join(
-                            [self.clean_latex_formatting(cell.strip()) for cell in cells]) + ' |')
-
-                # Combine with caption
-                md_table_str = '\n'.join(md_table)
+                md_table = rows_to_md_table(rows, col_spec)
                 if caption:
-                    md_table_str += f"\n\n*{caption}*"
-
+                    md_table += f"\n\n*{caption}*"
                 if label:
-                    # Add an anchor for references
-                    md_table_str = f'<a id="{label}"></a>\n\n{md_table_str}'
+                    md_table = f'<a id="{label}"></a>\n\n{md_table}'
 
-                # Replace the original table environment
-                content = content.replace(match.group(0), md_table_str)
+                # 替换整个 \begin{table}...\end{table} 内容
+                content = content.replace(entire_table_env, md_table)
+
+        # ─────────────────────────────────────────────────────────────
+        # 处理不在 table 环境里的“裸” tabular
+        # ─────────────────────────────────────────────────────────────
+        standalone_tabular_pattern = r'\\begin{tabular}{(.*?)}(.*?)\\end{tabular}'
+        standalone_tabulars = re.finditer(standalone_tabular_pattern, content, re.DOTALL)
+        for match in standalone_tabulars:
+            # 如果它已经被上面 table 环境处理过，就跳过
+            if re.search(r'\\begin{table}.*?' + re.escape(match.group(0)) + r'.*?\\end{table}', content, re.DOTALL):
+                continue
+
+            col_spec = match.group(1)
+            rows_content = match.group(2)
+            rows_content = rows_content.replace('\\hline', '')
+
+            rows_raw = re.split(r'\\\\', rows_content)
+            rows = []
+            for row in rows_raw:
+                row = row.strip()
+                if row:
+                    cells = [cell.strip() for cell in row.split('&')]
+                    rows.append(cells)
+
+            md_table = rows_to_md_table(rows, col_spec)
+            # 直接替换这个 tabular
+            content = content.replace(match.group(0), md_table)
 
         return content
 
@@ -861,6 +1020,7 @@ class Latex2Md:
 
         return f"{authors}. \"{title}\". *{journal}*, {volume}{f'({number})' if number else ''}, {pages}, {year}."
 
+
     def format_book_entry(self, fields):
         """Format a book BibTeX entry for Markdown."""
         authors = fields.get('author', fields.get('editor', 'Unknown'))
@@ -930,7 +1090,9 @@ class Latex2Md:
             md_list = []
             for item in items:
                 if item.strip():
-                    md_list.append(f"- {item.strip()}")
+                    # Clean the item text
+                    clean_item = self.clean_latex_formatting(item.strip())
+                    md_list.append(f"- {clean_item}")
 
             # Replace the original itemize environment
             md_list_str = '\n'.join(md_list)
@@ -951,37 +1113,138 @@ class Latex2Md:
             item_num = 1
             for item in items:
                 if item.strip():
-                    md_list.append(f"{item_num}. {item.strip()}")
+                    # Clean the item text
+                    clean_item = self.clean_latex_formatting(item.strip())
+                    md_list.append(f"{item_num}. {clean_item}")
                     item_num += 1
 
             # Replace the original enumerate environment
             md_list_str = '\n'.join(md_list)
             content = content.replace(match.group(0), md_list_str)
 
+        # Find all description environments
+        description_pattern = r'\\begin{description}(.*?)\\end{description}'
+        descriptions = re.finditer(description_pattern, content, re.DOTALL)
+
+        for match in descriptions:
+            description_content = match.group(1)
+
+            # Split into items
+            items = re.split(r'\\item\s+', description_content)
+
+            # Create markdown list
+            md_list = []
+            for item in items:
+                if item.strip():
+                    # Check if item has a label
+                    item_match = re.match(r'\[(.*?)\](.*)', item.strip(), re.DOTALL)
+                    if item_match:
+                        label = item_match.group(1)
+                        desc = item_match.group(2)
+                        # Clean the text
+                        clean_label = self.clean_latex_formatting(label)
+                        clean_desc = self.clean_latex_formatting(desc)
+                        md_list.append(f"**{clean_label}**: {clean_desc}")
+                    else:
+                        # Clean the item text
+                        clean_item = self.clean_latex_formatting(item.strip())
+                        md_list.append(f"- {clean_item}")
+
+            # Replace the original description environment
+            md_list_str = '\n'.join(md_list)
+            content = content.replace(match.group(0), md_list_str)
+
         return content
 
     def final_cleanup(self, content):
-        """Perform final cleanup on the converted content."""
-        # Remove any remaining LaTeX commands
-        content = re.sub(r'\\[a-zA-Z]+(\[.*?\])?{.*?}', '', content)
+        """
+        对转成 Markdown 的文本做最后的清理。尽量别大幅改动表格行
+        """
+        import re
 
-        # Fix multiple blank lines
+        # 1) 去除形如 \centering, \vspace 等无参数命令（不跟 {…} 的）
+        content = re.sub(r'\\[a-zA-Z]+(\*)?(?!\{)', '', content)
+
+        # 2) 合并多余空行（3 行以上合并为 2 行）
         content = re.sub(r'\n{3,}', '\n\n', content)
 
-        # Fix spacing around headers
-        content = re.sub(r'([^\n])(#+ )', r'\1\n\n\2', content)
+        # -- 如果觉得表格和正文太挤，可以考虑只在“表格上方/下方没有空行”时插 1 行，
+        #    而不是盲目地多插空行。以下示例是更温和的处理：只做一次性插行，确保
+        #    表格行 |xxx|xxx| 之前后至少有一个空行。
+        #
+        # 3) 确保表格块段落前后有空行 (可选)
+        content = re.sub(r'([^|\n])\n(\|)', r'\1\n\n\2', content)
+        content = re.sub(r'(\|.*?\n)([^|\n])', r'\1\n\2', content)
 
-        # Fix spacing after headers
-        content = re.sub(r'(#+ .*?)\n([^\n])', r'\1\n\n\2', content)
+        # 4) 标题行与正文间插空行（可选）
+        content = re.sub(r'([^\n])(#+ )', r'\1\n\n\2', content)
+        content = re.sub(r'(#+ .*?)\n([^-\n])', r'\1\n\n\2', content)
+
+        # 5) 数学公式上下加空行（可选）
+        content = re.sub(r'([^\n])(\n\$\$)', r'\1\n\n\2', content)
+        content = re.sub(r'(\$\$\n)([^\n])', r'\1\n\2', content)
 
         return content
 
     def clean_latex_formatting(self, text):
-        """Clean LaTeX formatting from text."""
-        # Remove LaTeX formatting commands
-        text = re.sub(r'\\[a-zA-Z]+(\[.*?\])?{(.*?)}', r'\2', text)
+        """
+        尽量干净地去除或简化常见的 LaTeX 命令，同时保留常见数学公式的可读性。
+        """
+        import re
 
-        # Replace LaTeX special characters
+        # 1) 先特殊处理 \frac{...}{...}
+        #    这里将它保留在数学环境，比如 "$\\frac{x}{y}$"；也可以改成 "(x/y)" 文本形式。
+        text = re.sub(
+            r'\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}',
+            r'$\frac{\1}{\2}$',
+            text
+        )
+
+        # 2) 处理 LaTeX 内联公式 ( \(...\) → $...$ )，以及行间公式 ( \[...\] → $$...$$ )
+        text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+        text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+
+        # 3) 常见的文字加粗、斜体、下划线等
+        text = re.sub(r'\\textbf{(.*?)}', r'**\1**', text, flags=re.DOTALL)
+        text = re.sub(r'\\textit{(.*?)}', r'*\1*', text, flags=re.DOTALL)
+        text = re.sub(r'\\emph{(.*?)}', r'*\1*', text, flags=re.DOTALL)
+        text = re.sub(r'\\underline{(.*?)}', r'<u>\1</u>', text, flags=re.DOTALL)
+        text = re.sub(r'\\sout{(.*?)}', r'~~\1~~', text, flags=re.DOTALL)
+        text = re.sub(r'\\texttt{(.*?)}', r'`\1`', text, flags=re.DOTALL)
+
+        # 4) 处理 \url{...} 为 Markdown 链接
+        text = re.sub(r'\\url{(.*?)}', r'[\1](\1)', text, flags=re.DOTALL)
+
+        # 5) 处理 \textcolor{color}{text} 等类似命令，这里直接简化成 <span style="color:xxx">...</span>
+        #    注意，如果 color 里有数字、空格等，需要自己再做更严格的过滤
+        text = re.sub(
+            r'\\textcolor\{([^\}]+)\}\{(.*?)\}',
+            r'<span style="color:\1">\2</span>',
+            text,
+            flags=re.DOTALL
+        )
+
+        # 6) 对于 \mathbf{...}、\mathit{...} 等常见数学命令，可根据需要做简单处理
+        text = re.sub(r'\\mathbf{(.*?)}', r'**\1**', text, flags=re.DOTALL)
+        text = re.sub(r'\\mathit{(.*?)}', r'*\1*', text, flags=re.DOTALL)
+
+        # 7) 再做一个通用处理：去掉大部分 “\cmd{…}” 类型的命令，只保留花括号内容
+        #    但排除前面已经处理过的 \frac 之类。如果还想排除其他命令，也可加 (?!xxx)
+        text = re.sub(
+            r'\\(?!frac)[a-zA-Z]+(\[.*?\])?\s*\{(.*?)}',
+            r'\2',
+            text,
+            flags=re.DOTALL
+        )
+
+        # 8) 去除多余花括号：有时嵌套花括号已经被前面替换大部分，这里做一次“傻瓜型”去壳
+        #    注意要多次应用，直到再也没有类似 {…}，以免一次无法去干净
+        old_text = ""
+        while old_text != text:
+            old_text = text
+            text = re.sub(r'(?<!\\)\{([^{}]*)\}', r'\1', text)
+
+        # 9) 替换一些 LaTeX 特殊转义字符：~、\%, \_ 等
         replacements = {
             '~': ' ',
             '\\&': '&',
@@ -997,9 +1260,8 @@ class Latex2Md:
             '\\LaTeX': 'LaTeX',
             '\\TeX': 'TeX'
         }
-
-        for latex, replacement in replacements.items():
-            text = text.replace(latex, replacement)
+        for latex_cmd, rep in replacements.items():
+            text = text.replace(latex_cmd, rep)
 
         return text
 
